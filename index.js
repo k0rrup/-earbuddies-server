@@ -16,6 +16,9 @@ const io = new Server(server, {
 const SPOTIFY_CLIENT_ID = process.env.SPOTIFY_CLIENT_ID;
 const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 
+console.log('[init] CLIENT_ID:', SPOTIFY_CLIENT_ID ? 'set' : 'MISSING');
+console.log('[init] CLIENT_SECRET:', SPOTIFY_CLIENT_SECRET ? 'set' : 'MISSING');
+
 let spotifyToken = null;
 let tokenExpiry = 0;
 
@@ -37,11 +40,21 @@ async function getSpotifyToken() {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        const json = JSON.parse(data);
-        spotifyToken = json.access_token;
-        tokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
-        console.log('[spotify] got token');
-        resolve(spotifyToken);
+        console.log('[spotify] token response:', data);
+        try {
+          const json = JSON.parse(data);
+          if (json.error) {
+            console.error('[spotify] token error:', json.error, json.error_description);
+            reject(new Error(json.error_description));
+            return;
+          }
+          spotifyToken = json.access_token;
+          tokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
+          console.log('[spotify] got token ok');
+          resolve(spotifyToken);
+        } catch(e) {
+          reject(e);
+        }
       });
     });
     req.on('error', reject);
@@ -57,9 +70,7 @@ function spotifyGet(path) {
       hostname: 'api.spotify.com',
       path,
       method: 'GET',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      }
+      headers: { 'Authorization': `Bearer ${token}` }
     }, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -92,7 +103,7 @@ app.get('/search', async (req, res) => {
     res.json({ tracks });
   } catch (e) {
     console.error('[search] error:', e.message);
-    res.status(500).json({ tracks: [] });
+    res.status(500).json({ tracks: [], error: e.message });
   }
 });
 
