@@ -14,7 +14,6 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "socket.io": "^4.8.3",
-    "youtube-search-api": "^2.0.1",
-    "ytdl-core": "^4.11.5"
+    "youtube-search-api": "^2.0.1"
   }
 }
