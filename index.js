@@ -42,18 +42,11 @@ async function getSpotifyToken() {
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          if (json.error) {
-            console.error('[spotify] token error:', json.error, json.error_description);
-            reject(new Error(json.error_description));
-            return;
-          }
+          if (json.error) { reject(new Error(json.error_description)); return; }
           spotifyToken = json.access_token;
           tokenExpiry = Date.now() + (json.expires_in - 60) * 1000;
-          console.log('[spotify] got token ok');
           resolve(spotifyToken);
-        } catch(e) {
-          reject(e);
-        }
+        } catch(e) { reject(e); }
       });
     });
     req.on('error', reject);
@@ -98,7 +91,6 @@ app.get('/search', async (req, res) => {
       duration_ms: t.duration_ms,
       uri: t.uri,
       albumArt: t.album?.images?.[0]?.url || null,
-      previewUrl: t.preview_url || null,
     }));
     res.json({ tracks });
   } catch (e) {
@@ -107,29 +99,137 @@ app.get('/search', async (req, res) => {
   }
 });
 
+// ── Room state ────────────────────────────────────────────────────────────
+// Each room tracks: queue, currentIndex, isPlaying, startEpoch (when current track started)
 const rooms = {};
+
+function getRoom(roomId) {
+  if (!rooms[roomId]) {
+    rooms[roomId] = {
+      queue: [],
+      currentIndex: 0,
+      isPlaying: false,
+      startEpoch: null,
+      members: 0,
+    };
+  }
+  return rooms[roomId];
+}
+
+function getRoomSnapshot(roomId) {
+  const room = getRoom(roomId);
+  const positionMs = room.isPlaying && room.startEpoch
+    ? Date.now() - room.startEpoch
+    : 0;
+  return { ...room, positionMs };
+}
+
 io.on('connection', (socket) => {
+  let currentRoom = null;
   console.log('[socket] connected:', socket.id);
-  socket.on('join-room', ({ roomId, userId }) => {
+
+  socket.on('join_room', (roomId) => {
+    currentRoom = roomId;
     socket.join(roomId);
-    if (!rooms[roomId]) rooms[roomId] = { users: [], state: null };
-    rooms[roomId].users.push(userId);
-    socket.to(roomId).emit('user-joined', { userId });
-    if (rooms[roomId].state) socket.emit('sync-state', rooms[roomId].state);
+    const room = getRoom(roomId);
+    room.members++;
+    // Send current state so late joiners sync up
+    socket.emit('room_state', getRoomSnapshot(roomId));
+    io.to(roomId).emit('member_count', room.members);
   });
-  socket.on('play', ({ roomId, trackUri, position }) => {
-    if (rooms[roomId]) rooms[roomId].state = { trackUri, position, playing: true, ts: Date.now() };
-    socket.to(roomId).emit('play', { trackUri, position });
+
+  socket.on('add_to_queue', ({ roomId, track }) => {
+    const room = getRoom(roomId);
+    room.queue.push(track);
+    if (room.queue.length === 1) {
+      room.currentIndex = 0;
+      room.isPlaying = true;
+      room.startEpoch = Date.now();
+    }
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
   });
-  socket.on('pause', ({ roomId, position }) => {
-    if (rooms[roomId]) rooms[roomId].state = { ...rooms[roomId].state, playing: false, position };
-    socket.to(roomId).emit('pause', { position });
+
+  socket.on('play', ({ roomId }) => {
+    const room = getRoom(roomId);
+    if (!room.isPlaying && room.queue.length > 0) {
+      room.isPlaying = true;
+      room.startEpoch = Date.now();
+      io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+    }
   });
-  socket.on('seek', ({ roomId, position }) => {
-    if (rooms[roomId]) rooms[roomId].state = { ...rooms[roomId].state, position };
-    socket.to(roomId).emit('seek', { position });
+
+  socket.on('pause', ({ roomId }) => {
+    const room = getRoom(roomId);
+    room.isPlaying = false;
+    room.startEpoch = null;
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
   });
-  socket.on('disconnect', () => console.log('[socket] disconnected:', socket.id));
+
+  socket.on('skip', ({ roomId }) => {
+    const room = getRoom(roomId);
+    if (room.currentIndex < room.queue.length - 1) {
+      room.currentIndex++;
+      room.startEpoch = Date.now();
+      room.isPlaying = true;
+    } else {
+      room.isPlaying = false;
+    }
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+  });
+
+  socket.on('prev', ({ roomId }) => {
+    const room = getRoom(roomId);
+    if (room.currentIndex > 0) room.currentIndex--;
+    room.startEpoch = Date.now();
+    room.isPlaying = true;
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+  });
+
+  socket.on('jump_to', ({ roomId, index }) => {
+    const room = getRoom(roomId);
+    room.currentIndex = index;
+    room.isPlaying = true;
+    room.startEpoch = Date.now();
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+  });
+
+  socket.on('remove_from_queue', ({ roomId, index }) => {
+    const room = getRoom(roomId);
+    room.queue.splice(index, 1);
+    if (index < room.currentIndex) room.currentIndex = Math.max(0, room.currentIndex - 1);
+    if (room.currentIndex >= room.queue.length) room.currentIndex = Math.max(0, room.queue.length - 1);
+    if (room.queue.length === 0) { room.isPlaying = false; room.startEpoch = null; }
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+  });
+
+  socket.on('clear_queue', ({ roomId }) => {
+    const room = getRoom(roomId);
+    room.queue = [];
+    room.currentIndex = 0;
+    room.isPlaying = false;
+    room.startEpoch = null;
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+  });
+
+  socket.on('track_ended', ({ roomId }) => {
+    const room = getRoom(roomId);
+    if (room.currentIndex < room.queue.length - 1) {
+      room.currentIndex++;
+      room.startEpoch = Date.now();
+    } else {
+      room.isPlaying = false;
+      room.startEpoch = null;
+    }
+    io.to(roomId).emit('room_state', getRoomSnapshot(roomId));
+  });
+
+  socket.on('disconnect', () => {
+    if (currentRoom && rooms[currentRoom]) {
+      rooms[currentRoom].members = Math.max(0, rooms[currentRoom].members - 1);
+      io.to(currentRoom).emit('member_count', rooms[currentRoom].members);
+    }
+    console.log('[socket] disconnected:', socket.id);
+  });
 });
 
 const PORT = process.env.PORT || 3000;
