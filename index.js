@@ -40,7 +40,6 @@ async function getSpotifyToken() {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        console.log('[spotify] token response:', data);
         try {
           const json = JSON.parse(data);
           if (json.error) {
@@ -75,6 +74,8 @@ function spotifyGet(path) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
+        console.log('[spotifyGet] status:', res.statusCode);
+        console.log('[spotifyGet] body:', data.substring(0, 500));
         try { resolve(JSON.parse(data)); }
         catch (e) { reject(new Error('Bad JSON from Spotify')); }
       });
