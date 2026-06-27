@@ -75,7 +75,6 @@ function spotifyGet(path) {
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         console.log('[spotifyGet] status:', res.statusCode);
-        console.log('[spotifyGet] body:', data.substring(0, 500));
         try { resolve(JSON.parse(data)); }
         catch (e) { reject(new Error('Bad JSON from Spotify')); }
       });
@@ -91,7 +90,7 @@ app.get('/search', async (req, res) => {
   const q = req.query.q;
   if (!q) return res.json({ tracks: [] });
   try {
-    const data = await spotifyGet(`/v1/search?q=${encodeURIComponent(q)}&type=track&limit=15`);
+    const data = await spotifyGet(`/v1/search?q=${encodeURIComponent(q)}&type=track&limit=10`);
     const tracks = (data.tracks?.items || []).map(t => ({
       id: t.id,
       title: t.name,
